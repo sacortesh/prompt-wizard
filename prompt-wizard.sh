@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Prompt Wizard - Interactive CLI tool for structuring high-quality AI agent prompts
-# Usage: ./prompt-wizard.sh [--refine-using-claude]
+# Usage: ./prompt-wizard.sh [--refine <file>] [--refine-using-claude]
 
 set -e
 
@@ -15,15 +15,20 @@ COLOR_RESET='\033[0m'
 
 # Parse command-line arguments
 REFINE_WITH_CLAUDE=false
+REFINE_FILE=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     --refine-using-claude|-refine-using-claude)
       REFINE_WITH_CLAUDE=true
       shift
       ;;
+    --refine)
+      REFINE_FILE="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown option: $1"
-      echo "Usage: $0 [--refine-using-claude]"
+      echo "Usage: $0 [--refine <file>] [--refine-using-claude]"
       exit 1
       ;;
   esac
@@ -49,40 +54,51 @@ print_question() {
 # Function to read multi-line input
 read_multiline() {
   local prompt="$1"
+  local existing="$2"
   echo -e "${COLOR_YELLOW}$prompt${COLOR_RESET}" >&2
-  echo "(Enter content, then an empty line to finish, or type 'END' alone to skip)" >&2
+
+  if [[ -n "$existing" ]]; then
+    echo "(Existing content shown below)" >&2
+    echo "" >&2
+    echo -e "${COLOR_CYAN}$existing${COLOR_RESET}" >&2
+    echo "" >&2
+    echo "(Type 'KEEP' to keep, enter new content to replace, or empty line to skip)" >&2
+  else
+    echo "(Type content line by line, empty line to finish, or 'END' to skip)" >&2
+  fi
   echo "" >&2
 
   local input=""
-  local last_was_empty=false
   local is_first_line=true
 
   while IFS= read -r line; do
-    # Check for END marker
-    if [[ "$line" == "END" ]] && [[ "$is_first_line" == true ]]; then
-      # If END is the very first thing, skip this section
-      echo ""
+    # Handle KEEP for existing content
+    if [[ "$line" == "KEEP" ]] && [[ "$is_first_line" == true ]] && [[ -n "$existing" ]]; then
+      echo -n "$existing"
+      return
+    fi
+
+    # Handle END/skip
+    if [[ -z "$line" ]] && [[ "$is_first_line" == true ]]; then
+      if [[ -n "$existing" ]]; then
+        echo -n "$existing"
+      fi
       return
     fi
 
     is_first_line=false
 
-    # Check for empty line (section delimiter)
+    # Collect content until empty line
     if [[ -z "$line" ]]; then
-      if [[ "$last_was_empty" == true ]]; then
-        # Two empty lines = end of section
-        input="${input%$'\n'}"  # Remove last newline
-        break
-      fi
-      last_was_empty=true
-      input+=$'\n'
-    else
-      last_was_empty=false
-      input+="$line"$'\n'
+      # Empty line ends input
+      break
     fi
+
+    input+="$line"$'\n'
   done
 
-  echo -n "$input"
+  # Return input without trailing newline
+  echo -n "${input%$'\n'}"
 }
 
 # Function to escape special characters for markdown
@@ -92,6 +108,43 @@ escape_markdown() {
   text="${text//\\/\\\\}"
   text="${text//\`/\\\`}"
   echo "$text"
+}
+
+# Function to extract section from markdown file
+extract_section() {
+  local file="$1"
+  local section_name="$2"
+
+  if ! grep -q "^## $section_name" "$file"; then
+    return
+  fi
+
+  # Extract section between headers and trim blank lines from start/end
+  sed -n "/^## $section_name/,/^## /p" "$file" | \
+    sed '1d;$d' | \
+    sed -e :a -e '/^\s*$/{$d; N; ba' -e '   }' | \
+    sed -e '1{/^[[:space:]]*$/d;}'
+}
+
+# Function to load existing prompt file
+load_existing_prompt() {
+  local file="$1"
+
+  if [[ ! -f "$file" ]]; then
+    echo "Error: File not found: $file" >&2
+    exit 1
+  fi
+
+  echo "Loading existing prompt..." >&2
+  GOAL=$(extract_section "$file" "Core Objective")
+  SCOPE=$(extract_section "$file" "Scope")
+  RULES=$(extract_section "$file" "Rules & Constraints")
+  TECH=$(extract_section "$file" "Technical Context")
+  LANGUAGE=$(extract_section "$file" "Language & Localization")
+  PERSONA=$(extract_section "$file" "Persona & Style")
+  ROBUSTNESS=$(extract_section "$file" "Robustness")
+  SELF_IMPROVE=$(extract_section "$file" "Self-Improvement")
+  EVAL=$(extract_section "$file" "Test Cases & Validation Criteria")
 }
 
 # Welcome message
@@ -107,9 +160,16 @@ cat << 'EOF' >&2
 EOF
 echo -e "${COLOR_RESET}" >&2
 
-echo "Let's create a high-quality agent prompt together!" >&2
-echo "Answer the following 9 sections to design your AI agent." >&2
-echo "" >&2
+if [[ -n "$REFINE_FILE" ]]; then
+  load_existing_prompt "$REFINE_FILE"
+  echo "Refining existing prompt: $REFINE_FILE" >&2
+  echo "You can skip sections by leaving them empty or typing 'KEEP' to keep existing content." >&2
+  echo "" >&2
+else
+  echo "Let's create a high-quality agent prompt together!" >&2
+  echo "Answer the following 9 sections to design your AI agent." >&2
+  echo "" >&2
+fi
 
 # ============================================================================
 # SECTION 1: GOAL
@@ -120,7 +180,7 @@ print_question "What is the core objective of this agent?"
 echo "Example: 'A customer support bot that resolves issues in real-time'" >&2
 echo "" >&2
 
-GOAL=$(read_multiline "Enter the goal of your agent:")
+GOAL=$(read_multiline "Enter the goal of your agent:" "$GOAL")
 
 # ============================================================================
 # SECTION 2: SCOPE
@@ -134,7 +194,7 @@ echo "  - Outputs: Solutions, status updates" >&2
 echo "  - Boundaries: No refunds > \$500, no access to PII" >&2
 echo "" >&2
 
-SCOPE=$(read_multiline "Describe the scope:")
+SCOPE=$(read_multiline "Describe the scope:" "$SCOPE")
 
 # ============================================================================
 # SECTION 3: RULES & CONSTRAINTS
@@ -148,7 +208,7 @@ echo "  - Taboos: No making promises about refunds, no guarantees" >&2
 echo "  - Metrics: Response time < 2s, satisfaction > 95%" >&2
 echo "" >&2
 
-RULES=$(read_multiline "Enter rules and constraints:")
+RULES=$(read_multiline "Enter rules and constraints:" "$RULES")
 
 # ============================================================================
 # SECTION 4: TECH
@@ -162,7 +222,7 @@ echo "  - Model: GPT-4, max tokens 2048" >&2
 echo "  - Deployment: Lambda, 30s timeout" >&2
 echo "" >&2
 
-TECH=$(read_multiline "Enter technical context:")
+TECH=$(read_multiline "Enter technical context:" "$TECH")
 
 # ============================================================================
 # SECTION 5: LANGUAGE
@@ -173,7 +233,7 @@ print_question "What input/output languages? Any locale requirements?"
 echo "Example: English and Spanish, US and EU timezone handling, GDPR compliant" >&2
 echo "" >&2
 
-LANGUAGE=$(read_multiline "Enter language and localization requirements:")
+LANGUAGE=$(read_multiline "Enter language and localization requirements:" "$LANGUAGE")
 
 # ============================================================================
 # SECTION 6: PERSONA
@@ -187,7 +247,7 @@ echo "  - Concise but thorough" >&2
 echo "  - Use first person, avoid jargon" >&2
 echo "" >&2
 
-PERSONA=$(read_multiline "Describe the persona and style:")
+PERSONA=$(read_multiline "Describe the persona and style:" "$PERSONA")
 
 # ============================================================================
 # SECTION 7: ROBUSTNESS
@@ -201,7 +261,7 @@ echo "  - Guardrails: Always verify before taking action, log all decisions" >&2
 echo "  - Fallbacks: Escalate to human on uncertainty, graceful degradation" >&2
 echo "" >&2
 
-ROBUSTNESS=$(read_multiline "Enter robustness considerations:")
+ROBUSTNESS=$(read_multiline "Enter robustness considerations:" "$ROBUSTNESS")
 
 # ============================================================================
 # SECTION 8: SELF-IMPROVEMENT
@@ -215,7 +275,7 @@ echo "  - Track failure modes and adjust instructions" >&2
 echo "  - Weekly: review low-confidence decisions" >&2
 echo "" >&2
 
-SELF_IMPROVE=$(read_multiline "Enter self-improvement strategy:")
+SELF_IMPROVE=$(read_multiline "Enter self-improvement strategy:" "$SELF_IMPROVE")
 
 # ============================================================================
 # SECTION 9: EVALUATION
@@ -229,7 +289,7 @@ echo "  - Expected: Verify damage, approve refund, send confirmation" >&2
 echo "  - Criteria: Response time < 3s, accuracy 100%" >&2
 echo "" >&2
 
-EVAL=$(read_multiline "Enter test cases and validation criteria:")
+EVAL=$(read_multiline "Enter test cases and validation criteria:" "$EVAL")
 
 # ============================================================================
 # GENERATE OUTPUT
@@ -335,7 +395,7 @@ if [[ "$REFINE_WITH_CLAUDE" == true ]]; then
     REFINED_FILE="agent-prompt-${TIMESTAMP}-refined.md"
 
     # Use Claude to refine the prompt
-    if claude -m "Polish this agent prompt for clarity and completeness, preserving all structure and content. Make it more precise and actionable." < "$OUTPUT_FILE" > "$REFINED_FILE" 2>/dev/null; then
+    if cat "$OUTPUT_FILE" | claude —-dangerously-skip-permissions --raw "Polish this agent prompt for clarity and completeness, preserving all structure and content. Make it more precise and actionable." > "$REFINED_FILE" 2>/dev/null; then
       echo -e "${COLOR_GREEN}✓ Refined version created!${COLOR_RESET}" >&2
       echo "" >&2
       echo -e "Base file:     ${COLOR_BOLD}$OUTPUT_FILE${COLOR_RESET}" >&2
